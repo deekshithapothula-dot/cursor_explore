@@ -74,26 +74,49 @@ STOPWORDS = {
 }
 
 
-def tokenize_reason_cell(cell: str):
+
+# Some datasets prefix the whole cell with a category label (e.g. "UW - ")
+# followed by comma-separated reason codes/descriptions. This isn't itself a
+# reason, so strip it before tokenizing.
+CATEGORY_PREFIX_PATTERN = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 ]*\s*-\s*", flags=re.IGNORECASE)
+
+# Bare internal rule codes (e.g. "RJP3_21") are usually immediately followed
+# by their human-readable description in the same cell, so the code itself
+# is redundant noise once split apart -- drop standalone code tokens.
+BARE_CODE_PATTERN = re.compile(r"^[a-z]{2,10}\d*_\d+$", flags=re.IGNORECASE)
+
+
+def tokenize_reason_cell(cell: str, strip_category_prefix: bool = True, drop_bare_codes: bool = True):
     """Split a single Row Label cell into a list of cleaned atomic reasons."""
     if cell is None:
         return []
     text = str(cell).strip()
     if not text:
         return []
+    if strip_category_prefix:
+        text = CATEGORY_PREFIX_PATTERN.sub("", text, count=1)
     parts = SPLIT_PATTERN.split(text)
     cleaned = []
     for part in parts:
         part = CLEAN_PATTERN.sub("", part)
         part = MULTISPACE_PATTERN.sub(" ", part).strip()
-        if part:
-            cleaned.append(part.lower())
+        if not part:
+            continue
+        if drop_bare_codes and BARE_CODE_PATTERN.match(part):
+            continue
+        # Guards against source-data truncation artifacts (e.g. a cell cut
+        # off mid-word leaving a single stray letter as the last "reason").
+        if len(part) < 2:
+            continue
+        cleaned.append(part.lower())
     return cleaned if cleaned else [text.lower()]
 
 
-def explode_reasons(df: pd.DataFrame, reason_col: str) -> pd.DataFrame:
+def explode_reasons(df: pd.DataFrame, reason_col: str, strip_category_prefix: bool = True, drop_bare_codes: bool = True) -> pd.DataFrame:
     df = df.copy()
-    df["_reasons"] = df[reason_col].apply(tokenize_reason_cell)
+    df["_reasons"] = df[reason_col].apply(
+        lambda c: tokenize_reason_cell(c, strip_category_prefix=strip_category_prefix, drop_bare_codes=drop_bare_codes)
+    )
     exploded = df.explode("_reasons").rename(columns={"_reasons": "reason"})
     exploded = exploded[exploded["reason"].notna() & (exploded["reason"] != "")]
     return exploded
